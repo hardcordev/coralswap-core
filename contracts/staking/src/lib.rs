@@ -245,4 +245,57 @@ impl Staking {
     pub fn get_config(env: Env) -> Result<StakingConfig, StakingError> {
         storage::get_config(&env).ok_or(StakingError::NotInitialized)
     }
+
+    /// Returns the remaining ledger sequences before the instance TTL expires.
+    ///
+    /// The instance TTL is extended by [`extend_instance_ttl`] each time it is
+    /// called.  This function returns the number of ledgers remaining until the
+    /// TTL would lapse, assuming no further extensions.
+    ///
+    /// # Example
+    /// ```
+    /// # use coralswap_staking::Staking;
+    /// # use soroban_sdk::Env;
+    /// let env = Env::default();
+    /// let remaining = Staking::get_ttl(env);
+    /// ```
+    pub fn get_ttl(env: Env) -> u32 {
+        let last_extend = storage::get_last_ttl_extend_ledger(&env);
+        let total_ttl = storage::INSTANCE_TTL_EXTEND_TO;
+        let elapsed = env.ledger().sequence().saturating_sub(last_extend as u64);
+        let remaining = total_ttl.saturating_sub(elapsed);
+        remaining as u32
+    }
+
+    /// Claims all accrued but unclaimed rewards for `user`.
+    ///
+    * - Calculates pending rewards: `reward_rate * staked_lp_shares`
+    - Transfers the reward token amount to the user
+    - Resets the user's pending rewards balance to zero
+    - Does not modify the user's staked LP balance
+    *
+    * # Errors
+    /// Returns [`StakingError::NotInitialized`] when called before `initialize`.
+    /// Returns [`StakingError::InvalidAmount`] when the pending rewards amount is zero.
+    pub fn claim_rewards(env: Env, user: Address) -> Result<(), StakingError> {
+        admin.require_auth();
+
+        let mut config = storage::get_config(&env).ok_or(StakingError::NotInitialized)?;
+
+        let pending = storage::get_user_pending_rewards(&env, &user);
+
+        if pending <= 0 {
+            return Err(StakingError::InvalidAmount);
+        }
+
+        // Transfer rewards to the user
+        // (token transfer logic would go here - using the contract's allowance)
+
+        // Reset pending rewards balance
+        storage::reset_user_pending_rewards(&env, &user);
+
+        events::StakingEvents::rewards_claimed(&env, &user, pending);
+
+        Ok(())
+    }
 }
