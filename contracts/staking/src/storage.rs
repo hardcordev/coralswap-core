@@ -19,6 +19,10 @@ pub enum DataKey {
     TotalStaked,
     /// `i128` — per-user staked LP token balance, keyed by staker address.
     UserStake(Address),
+    /// `i128` — per-user accrued but unclaimed reward balance, keyed by staker address.
+    UserPendingRewards(Address),
+    /// u32 — ledger number at which TTL was last extended, for TTL querying.
+    LastTTLExtendLedger,
 }
 
 // ---------------------------------------------------------------------------
@@ -81,9 +85,39 @@ pub fn set_user_stake(env: &Env, user: &Address, amount: i128) {
     env.storage().instance().set(&DataKey::UserStake(user.clone()), &amount);
 }
 
+pub fn set_user_stake(env: &Env, user: &Address, amount: i128) {
+    env.storage().instance().set(&DataKey::UserStake(user.clone()), &amount);
+}
+
+pub fn get_user_pending_rewards(env: &Env, user: &Address) -> i128 {
+    env.storage().instance().get(&DataKey::UserPendingRewards(user.clone())).unwrap_or(0i128)
+}
+
+pub fn set_user_pending_rewards(env: &Env, user: &Address, amount: i128) {
+    env.storage().instance().set(&DataKey::UserPendingRewards(user.clone()), &amount);
+}
+
+pub fn add_user_pending_rewards(env: &Env, user: &Address, amount: i128) {
+    let current = storage::get_user_pending_rewards(&env, user);
+    storage::set_user_pending_rewards(&env, user, current.checked_add(amount).expect("overflow"));
+}
+
+pub fn reset_user_pending_rewards(env: &Env, user: &Address) {
+    storage::set_user_pending_rewards(&env, user, 0);
+}
+
+pub fn get_last_ttl_extend_ledger(env: &Env) -> u32 {
+    env.storage().instance().get(&DataKey::LastTTLExtendLedger).unwrap_or(0)
+}
+
+pub fn set_last_ttl_extend_ledger(env: &Env, ledger: u32) {
+    env.storage().instance().set(&DataKey::LastTTLExtendLedger, &ledger);
+}
+
 /// Extends the instance TTL using the shared policy (3.5 days threshold →
 /// 7 days bump).  Must be called at the end of every mutating entry point so
 /// the contract stays alive across idle periods.
-pub fn extend_instance_ttl(env: &Env) {
+pub fn extend_instance_ttl(env: &Env, current_ledger: u32) {
     env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+    storage::set_last_ttl_extend_ledger(env, current_ledger);
 }

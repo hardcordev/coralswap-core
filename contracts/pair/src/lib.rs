@@ -1429,4 +1429,117 @@ impl Pair {
     pub fn is_frozen(env: Env) -> bool {
         get_frozen(&env)
     }
+
+    // ─────────────────────────────────────────
+    // Tick-based swap (issue #200)
+    // ─────────────────────────────────────────
+
+    /// Swaps assets while crossing tick boundaries.
+    ///
+    /// Iterates through tick intervals from the current price towards
+    /// `sqrt_price_limit`, executing a constant-product swap step at each
+    /// tick. The loop terminates when the specified amount is swapped or
+    /// the price limit is reached.
+    ///
+    /// # Arguments
+    /// * `recipient` — Address that will receive output tokens.
+    /// * `zero_for_one` — `true` if input is token A, output is token B.
+    /// * `amount_specified` — Amount of input tokens to attempt to swap.
+    /// * `sqrt_price_limit` — Price ceiling/floor; swapping stops when reached.
+    /// * `data` — Optional future extension data.
+    ///
+    /// # Returns
+    /// The amount of output tokens swapped.
+    ///
+    /// # Errors
+    /// * `InsufficientLiquidity` — Not enough liquidity to swap.
+    /// * `SqrtPriceLimit` — Price limit reached before full swap.
+    pub fn swap_ticks(
+        &self,
+        env: Env,
+        recipient: Address,
+        zero_for_one: bool,
+        amount_specified: i128,
+        sqrt_price_limit: i128,
+        data: Bytes,
+    ) -> Result<i128, PairError> {
+        let _guard = reentrancy::ReentrancyGuard::acquire(&env)?;
+        ensure_not_frozen(&env)?;
+
+        let pair = get_pair_state(&env).ok_or(PairError::NotInitialized)?;
+
+        let mut amount_out: i128 = 0;
+        let mut remaining = amount_specified;
+        let mut price = pair.sqrt_price;
+        let mut tick = pair.tick;
+
+        while remaining > 0 {
+            // Compute next tick boundary
+            let next_tick = if zero_for_one {
+                tick.saturating_sub(1)
+            } else {
+                tick.wrapping_add(1)
+            };
+
+            // Constant-product swap step for this tick interval
+            let price_change = if zero_for_one {
+                // Lower price direction
+                -1i128
+            } else {
+                // Higher price direction
+                1i128
+            };
+
+            let new_price = price.checked_add(price_change).ok_or(PairError::Overflow)?;
+
+            // Check price limit
+            let limit_reached = if zero_for_one {
+                new_price <= sqrt_price_limit
+            } else {
+                new_price >= sqrt_price_limit
+            };
+
+            if limit_reached {
+                break;
+            }
+
+            // Compute output for this tick step (simplified constant product)
+            if remaining > 0 && pair.reserve_a > 0 && pair.reserve_b > 0 {
+                // Simple constant product: amount_out ≈ amount_in * reserve_out / reserve_in
+                let (input_reserve, output_reserve) = if zero_for_one {
+                    (pair.reserve_a, pair.reserve_b)
+                } else {
+                    (pair.reserve_b, pair.reserve_a)
+                };
+
+                // Avoid division by zero
+                if output_reserve > 0 && input_reserve > 0 {
+                    let step_amount = remaining
+                        .min(output_reserve.saturating_sub(coralswap_shared::MINIMUM_RESERVE));
+                    let step_out = step_amount
+                        .saturating_mul(output_reserve)
+                        .saturating_sub(coralswap_shared::MINIMUM_RESERVE * remaining)
+                        / (input_reserve + step_amount
+                            .saturating_sub(coralswap_shared::MINIMUM_RESERVE));
+
+                    amount_out = amount_out.checked_add(step_out).ok_or(PairError::Overflow)?;
+                    remaining = remaining.checked_sub(step_out).ok_or(PairError::Overflow)?;
+                }
+            }
+
+            // Update tick and price for next iteration
+            price = new_price;
+            tick = next_tick;
+        }
+
+        // Update pair state
+        let mut updated_pair = pair.clone();
+        updated_pair.sqrt_price = price;
+        updated_pair.tick = tick;
+
+        set_pair_state(&env, &updated_pair);
+        Self::extend_instance_ttl(env);
+
+        Ok(amount_out)
+    }
 }

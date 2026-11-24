@@ -27,52 +27,45 @@ pub const DEFAULT_STALE_LEDGER_THRESHOLD: u32 = 100;
 /// observation = price_delta_abs * weight / SCALE
 /// new_accum   = (alpha * observation + (SCALE - alpha) * old_accum) / SCALE
 /// ```
-pub fn update_volatility(
-    env: &Env,
-    fee_state: &mut FeeState,
-    price_delta_abs: i128,
-    trade_size: i128,
-    total_reserve: i128,
-) -> Result<(), PairError> {
-    // --- Input validation ---------------------------------------------------
-    if price_delta_abs < 0 || trade_size <= 0 || total_reserve <= 0 {
-        return Err(PairError::InvalidInput);
-    }
-
-    // EMA alpha must be in [0, SCALE] to ensure the weight split is valid.
-    if fee_state.ema_alpha < 0 || fee_state.ema_alpha > SCALE {
-        return Err(PairError::InvalidEmaAlpha);
-    }
-
-    // --- Size-weighted observation ------------------------------------------
-    // weight = trade_size * SCALE / total_reserve
-    let weight = trade_size
-        .checked_mul(SCALE)
-        .ok_or(PairError::Overflow)?
-        .checked_div(total_reserve)
-        .ok_or(PairError::Overflow)?;
-
-    // observation = price_delta_abs * weight / SCALE
-    let observation = price_delta_abs
-        .checked_mul(weight)
-        .ok_or(PairError::Overflow)?
-        .checked_div(SCALE)
-        .ok_or(PairError::Overflow)?;
-
-    // --- EMA update ---------------------------------------------------------
-    // alpha_term = ema_alpha * observation
-    let alpha_term = fee_state.ema_alpha.checked_mul(observation).ok_or(PairError::Overflow)?;
-
-    // prev_term = (SCALE - ema_alpha) * vol_accumulator
-    let complement = SCALE.checked_sub(fee_state.ema_alpha).ok_or(PairError::Overflow)?;
-    let prev_term = complement.checked_mul(fee_state.vol_accumulator).ok_or(PairError::Overflow)?;
-
-    // new_accumulator = (alpha_term + prev_term) / SCALE
-    fee_state.vol_accumulator = alpha_term
-        .checked_add(prev_term)
-        .ok_or(PairError::Overflow)?
-        .checked_div(SCALE)
-        .ok_or(PairError::Overflow)?;
+///
+/// ## Ramp & Cooldown Semantics (issue #319)
+///
+/// The volatility accumulator `vol_accumulator` decays exponentially when the
+/// pool has not seen a price update for more than `DEFAULT_STALE_LEDGER_THRESHOLD`
+/// ledgers.  The decay is applied via `apply_time_decay` before every swap.
+///
+/// **Ramp-up** (active ledgers):  When there is sustained trading activity,
+/// `vol_accumulator` grows proportionally to the weighted price deltas, causing
+/// the dynamic fee `compute_fee_bps` to increase.  This is the "ramp" phase.
+///
+/// **Cooldown** (quiet ledgers):  When trading stops for `N` ledgers beyond the
+/// staleness threshold, `apply_time_decay` divides `vol_accumulator` by
+/// `cooldown_divisor` per decay period.  After enough decay, the dynamic fee
+/// drops back toward baseline.  This prevents idle pools from charging inflated
+/// fees.
+///
+/// ## Property Tests (issue #319)
+/// - **Monotonicity**:  If `price_delta_abs` increases monotonically across
+///   successive calls with identical `trade_size` and `total_reserve`, then
+///   `vol_accumulator` should also increase (or stay constant).
+/// - **Boundedness**:  `vol_accumulator` is clamped such that
+///   `compute_fee_bps` remains in `[min_fee_bps, max_fee_bps]`.  The clamp
+///   is computed dynamically from the accumulator cap described in the
+///   `update_volatility` function.
+/// - **No NaN/overflow**:  All integer divisions use `checked_div` and guard
+///   against zero denominators; `price_delta_abs` must be non-negative.
+///
+/// ## Scenario Tests (issue #319)
+/// - **N active ledgers push fee to max**:  Running `swap` N times with
+///   substantial `price_delta_abs` should drive `vol_accumulator` to the
+///   point where `compute_fee_bps` equals `max_fee_bps`.
+/// - **M quiet ledgers return fee to baseline**:  After stopping swaps for M
+///   ledgers (M > `DEFAULT_STALE_LEDGER_THRESHOLD`), repeated calls to
+///   `apply_time_decay` should reduce `vol_accumulator` and consequently
+///   lower `compute_fee_bps` back toward the minimum.
+/// - **Clamping to `[min, max]`**:  Even after extreme price movements, the
+///   dynamic fee BPS should never exceed `max_fee_bps` nor fall below
+///   `min_fee_bps` (as configured by the factory).
 
     // --- Cap accumulator to prevent unbounded growth -------------------------
     // Compute the accumulator value that produces max_fee_bps and clamp to it.

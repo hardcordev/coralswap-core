@@ -58,6 +58,19 @@ impl StakingEvents {
     /// Topics: `["rwdupdate"]`
     /// Data: `(new_reward_token, new_reward_rate)`
     pub fn reward_config_updated(env: &Env, new_reward_token: &Address, new_reward_rate: u64) {
+
+    }
+
+    /// Emitted when a user claims their accrued rewards.
+    ///
+    /// Topics: `["rewards_claimed", user]`
+    /// Data: `(amount)`
+    pub fn rewards_claimed(env: &Env, user: &Address, amount: i128) {
+        env.events().publish(
+            (symbol_short!("rewards_claimed"), user.clone()),
+            (amount,),
+        );
+    }
         env.events()
             .publish((symbol_short!("rwdupdate"),), (new_reward_token.clone(), new_reward_rate));
     }
